@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-# 3分無料診断（Phase 1+2+3 完成版 / JST対応 / QR右寄せ / ロゴ堅牢化）
+# 3分無料診断（JST対応 / 1ページPDF強化 / AIコメント自動生成）
 # - 設問10問 → スコア化 → 6タイプ判定 → 信号色表示
-# - PDF出力（日本語TTF埋め込み、棒グラフ、ロゴ/ブランド色、URL横にQR）
+# - PDF出力（日本語TTF埋め込み、棒グラフ、ロゴ・QR最適化、1ページ収まり強化）
 # - ログ保存（Google Sheets / CSV）
-# - OpenAIで“約300字”のAIコメント自動生成（Secrets/環境変数両対応）
-# - セッション保持で再実行しても結果画面を維持
-# - ロゴはローカル優先（/content/CImark.png 等）→ 失敗時はURL取得
+# - OpenAIで“約300字”のAIコメントを**自動生成**（Secrets/環境変数両対応）
+# - ロゴはローカル優先（assets/CImark.png）→ 失敗時はURL取得
 
 import os
 import io
@@ -13,7 +12,6 @@ import json
 import time
 import tempfile
 from datetime import datetime, timedelta, timezone
-import urllib.request
 
 import streamlit as st
 import pandas as pd
@@ -33,21 +31,17 @@ from reportlab.pdfbase.pdfmetrics import registerFontFamily
 
 # Matplotlib日本語フォント
 from matplotlib import font_manager
-
-# 画像・QR
 from PIL import Image as PILImage
 import qrcode
+import requests
 
 # Google Sheets（任意）
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ネットワークフォールバック
-import requests
-
 # ========= ブランド & 定数 =========
 BRAND_BG = "#f0f7f7"
-LOGO_LOCAL = "/content/CImark.png"  # Colabにアップしたら最優先で使用
+LOGO_LOCAL = "assets/CImark.png"  # ← GitHub/Streamlit Cloud用
 LOGO_URL   = "https://victorconsulting.jp/wp-content/uploads/2025/10/CImark.png"
 CTA_URL    = "https://victorconsulting.jp/spot-diagnosis/"
 OPENAI_MODEL = "gpt-4o-mini"
@@ -63,26 +57,28 @@ st.set_page_config(
 )
 
 # ---- session init ----
-for k, v in {
+defaults = {
     "result_ready": False, "df": None, "overall_avg": None, "signal": None,
-    "main_type": None, "company": "", "email": "", "ai_comment": None
-}.items():
+    "main_type": None, "company": "", "email": "",
+    "ai_comment": None, "ai_tried": False
+}
+for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ========= Secrets 安全読み取り =========
+# ========= Secrets/環境変数 =========
 def read_secret(key: str, default=None):
     try:
         return st.secrets[key]
     except Exception:
         return os.environ.get(key, default)
 
-# ========= 日本語TTF 登録（ReportLab & Matplotlib）=========
+# ========= 日本語TTF 登録 =========
 def setup_japanese_font():
     candidates = [
-        "/content/NotoSansJP-Regular.ttf",
+        "NotoSansJP-Regular.ttf",
         "/mnt/data/NotoSansJP-Regular.ttf",
-        "./NotoSansJP-Regular.ttf",
+        "/content/NotoSansJP-Regular.ttf",
     ]
     font_path = next((p for p in candidates if os.path.exists(p)), None)
     if not font_path:
@@ -109,10 +105,10 @@ st.markdown(
     f"""
 <style>
 .stApp {{ background: {BRAND_BG}; }}
-.block-container {{ padding-top: 2.8rem; }}   /* タイトル頭が切れないよう余白拡大 */
+.block-container {{ padding-top: 2.8rem; }}
 h1 {{ margin-top: .6rem; }}
 .result-card {{
-  background: white; border-radius: 14px; padding: 1.2rem 1.1rem;
+  background: white; border-radius: 14px; padding: 1.0rem 1.0rem;
   box-shadow: 0 6px 20px rgba(0,0,0,.06); border: 1px solid rgba(0,0,0,.06);
 }}
 .badge {{ display:inline-block; padding:.25rem .6rem; border-radius:999px; font-size:.9rem;
@@ -121,7 +117,7 @@ h1 {{ margin-top: .6rem; }}
 .badge-yellow{{ background:#fff6d8; color:#8a6d00; border:1px solid #ffecb3; }}
 .badge-red   {{ background:#ffe6e6; color:#a80000; border:1px solid #ffc7c7; }}
 .small-note {{ color:#666; font-size:.9rem; }}
-hr {{ border:none; border-top:1px dotted #c9d7d7; margin:1.1rem 0; }}
+hr {{ border:none; border-top:1px dotted #c9d7d7; margin:1.0rem 0; }}
 </style>
 """,
     unsafe_allow_html=True
@@ -132,13 +128,11 @@ def path_or_download_logo() -> str | None:
     if os.path.exists(LOGO_LOCAL):
         return LOGO_LOCAL
     try:
-        for _ in range(2):
-            r = requests.get(LOGO_URL, timeout=8)
-            if r.ok:
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                tmp.write(r.content); tmp.flush()
-                return tmp.name
-            time.sleep(1.2)
+        r = requests.get(LOGO_URL, timeout=8)
+        if r.ok:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            tmp.write(r.content); tmp.flush()
+            return tmp.name
     except Exception:
         pass
     return None
@@ -147,7 +141,7 @@ def path_or_download_logo() -> str | None:
 with st.sidebar:
     logo_path = path_or_download_logo()
     if logo_path:
-        st.image(logo_path, width=160)
+        st.image(logo_path, width=150)  # 少し小さめ
     st.markdown("### 3分無料診断")
     st.markdown("- 入力は Yes/部分的/No と 5段階のみ\n- 機密数値は不要\n- 結果は 6タイプ＋赤/黄/青")
     st.caption("© Victor Consulting")
@@ -223,9 +217,9 @@ def fallback_append_to_csv(row_dict: dict, csv_path="responses.csv"):
     else:
         df.to_csv(csv_path, index=False, encoding="utf-8")
 
-# ========= PDFユーティリティ =========
+# ========= 図・QRユーティリティ =========
 def build_bar_png(df: pd.DataFrame) -> bytes:
-    fig, ax = plt.subplots(figsize=(5.2, 2.6), dpi=220)
+    fig, ax = plt.subplots(figsize=(5.0, 2.4), dpi=220)  # 少し小型化
     df_sorted = df.sort_values("平均スコア", ascending=True)
     ax.barh(df_sorted["カテゴリ"], df_sorted["平均スコア"])
     ax.set_xlim(0, 5)
@@ -258,98 +252,7 @@ def build_qr_png(data_url: str) -> bytes:
     buf.seek(0)
     return buf.read()
 
-def make_pdf_bytes(result: dict, df_scores: pd.DataFrame, brand_hex=BRAND_BG) -> bytes:
-    # ロゴ解決（ローカル優先）
-    logo_path = path_or_download_logo()
-    bar_png = build_bar_png(df_scores)
-    qr_png  = build_qr_png(CTA_URL)
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
-    )
-
-    styles = getSampleStyleSheet()
-    title = styles["Title"]; normal = styles["BodyText"]; h3 = styles["Heading3"]
-    if FONT_PATH_IN_USE:
-        title.fontName = normal.fontName = h3.fontName = "JP"
-
-    elems = []
-    # ロゴ（縦横比維持）
-    if logo_path:
-        elems.append(image_with_max_width(logo_path, max_w=140))
-        elems.append(Spacer(1, 8))
-
-    elems.append(Paragraph("3分無料診断レポート", title))
-    elems.append(Spacer(1, 6))
-    meta = (
-        f"会社名：{result['company'] or '（未入力）'}　/　"
-        f"実施日時：{result['dt']}　/　"
-        f"信号：{result['signal']}　/　"
-        f"タイプ：{result['main_type']}"
-    )
-    elems.append(Paragraph(meta, normal))
-    elems.append(Spacer(1, 8))
-
-    elems.append(Paragraph("診断コメント", h3))
-    elems.append(Paragraph(result["comment"], normal))
-    elems.append(Spacer(1, 8))
-
-    # 表
-    table_data = [["カテゴリ", "平均スコア（0-5）"]] + [
-        [r["カテゴリ"], f"{r['平均スコア']:.2f}"] for _, r in df_scores.iterrows()
-    ]
-    tbl = Table(table_data, colWidths=[220, 150])
-    style_list = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(brand_hex)),
-        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.black),
-        ("GRID",       (0, 0), (-1, -1), 0.3, colors.grey),
-        ("ALIGN",      (1, 1), (-1, -1), "CENTER"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-    ]
-    if FONT_PATH_IN_USE:
-        style_list.append(("FONTNAME", (0, 0), (-1, -1), "JP"))
-    tbl.setStyle(TableStyle(style_list))
-    elems.append(tbl)
-    elems.append(Spacer(1, 8))
-
-    # 棒グラフ
-    bar_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    bar_tmp.write(bar_png); bar_tmp.flush()
-    elems.append(Paragraph("カテゴリ別スコア（棒グラフ）", h3))
-    elems.append(Image(bar_tmp.name, width=420, height=210))
-    elems.append(Spacer(1, 8))
-
-    # 「次の一手」：左に文言、右にQR を横並びにするためTableを使用
-    elems.append(Paragraph("次の一手（90分スポット診断のご案内）", h3))
-
-    # 左セル（URL文言）
-    url_par = Paragraph(f"詳細・お申込み：<u>{CTA_URL}</u>", normal)
-
-    # 右セル（QR画像：やや小さめで1ページに収める）
-    qr_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-    qr_tmp.write(qr_png); qr_tmp.flush()
-    qr_img = Image(qr_tmp.name, width=60, height=60)
-
-    next_table = Table(
-        [[url_par, qr_img]],
-        colWidths=[430, 80]  # 左を広め、右にQR
-    )
-    nt_style = [
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN",  (1, 0), (1, 0), "RIGHT"),
-    ]
-    if FONT_PATH_IN_USE:
-        nt_style.append(("FONTNAME", (0, 0), (-1, -1), "JP"))
-    next_table.setStyle(TableStyle(nt_style))
-    elems.append(next_table)
-
-    doc.build(elems)
-    buf.seek(0)
-    return buf.read()
-
-# ========= OpenAI: AIコメント生成 =========
+# ========= OpenAI: AIコメント自動生成 =========
 def _openai_client(api_key: str):
     try:
         from openai import OpenAI  # 新SDK
@@ -403,6 +306,101 @@ def generate_ai_comment(company: str, main_type: str, df_scores: pd.DataFrame, o
     except Exception as e:
         return None, f"AIコメント生成でエラー: {e}"
 
+def clamp_comment(text: str, max_chars: int = 340) -> str:
+    if not text: return ""
+    t = " ".join(text.strip().split())  # 改行・連続空白を正規化
+    return t if len(t) <= max_chars else (t[:max_chars - 1] + "…")
+
+# ========= PDF生成 =========
+def make_pdf_bytes(result: dict, df_scores: pd.DataFrame, brand_hex=BRAND_BG) -> bytes:
+    logo_path = path_or_download_logo()
+    bar_png = build_bar_png(df_scores)
+    qr_png  = build_qr_png(CTA_URL)
+
+    buf = io.BytesIO()
+    # 余白を小さくして可視領域を拡大（1ページ収まり強化）
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        rightMargin=32, leftMargin=32, topMargin=28, bottomMargin=28
+    )
+
+    styles = getSampleStyleSheet()
+    title = styles["Title"]; normal = styles["BodyText"]; h3 = styles["Heading3"]
+    if FONT_PATH_IN_USE:
+        title.fontName = normal.fontName = h3.fontName = "JP"
+    # 本文をやや詰める
+    normal.fontSize = 10
+    normal.leading = 14
+    h3.spaceBefore = 6
+    h3.spaceAfter = 4
+
+    elems = []
+    # ロゴ（さらに小型化）
+    if logo_path:
+        elems.append(image_with_max_width(logo_path, max_w=120))
+        elems.append(Spacer(1, 6))
+
+    elems.append(Paragraph("3分無料診断レポート", title))
+    elems.append(Spacer(1, 4))
+    meta = (
+        f"会社名：{result['company'] or '（未入力）'}　/　"
+        f"実施日時：{result['dt']}　/　"
+        f"信号：{result['signal']}　/　"
+        f"タイプ：{result['main_type']}"
+    )
+    elems.append(Paragraph(meta, normal))
+    elems.append(Spacer(1, 6))
+
+    elems.append(Paragraph("診断コメント", h3))
+    elems.append(Paragraph(clamp_comment(result["comment"], 340), normal))
+    elems.append(Spacer(1, 6))
+
+    # 表
+    table_data = [["カテゴリ", "平均スコア（0-5）"]] + [
+        [r["カテゴリ"], f"{r['平均スコア']:.2f}"] for _, r in df_scores.iterrows()
+    ]
+    tbl = Table(table_data, colWidths=[220, 140])  # 少し詰める
+    style_list = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(brand_hex)),
+        ("TEXTCOLOR",  (0, 0), (-1, 0), colors.black),
+        ("GRID",       (0, 0), (-1, -1), 0.3, colors.grey),
+        ("ALIGN",      (1, 1), (-1, -1), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+    ]
+    if FONT_PATH_IN_USE:
+        style_list.append(("FONTNAME", (0, 0), (-1, -1), "JP"))
+    tbl.setStyle(TableStyle(style_list))
+    elems.append(tbl)
+    elems.append(Spacer(1, 6))
+
+    # 棒グラフ（小型化）
+    bar_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    bar_tmp.write(bar_png); bar_tmp.flush()
+    elems.append(Paragraph("カテゴリ別スコア（棒グラフ）", h3))
+    elems.append(Image(bar_tmp.name, width=400, height=190))
+    elems.append(Spacer(1, 6))
+
+    # 「次の一手」：左に文言、右にQR（QRも小型化）
+    elems.append(Paragraph("次の一手（90分スポット診断のご案内）", h3))
+    url_par = Paragraph(f"詳細・お申込み：<u>{CTA_URL}</u>", normal)
+    qr_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    qr_tmp.write(qr_png); qr_tmp.flush()
+    qr_img = Image(qr_tmp.name, width=56, height=56)  # 60→56
+
+    next_table = Table([[url_par, qr_img]], colWidths=[430, 70])
+    nt_style = [
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN",  (1, 0), (1, 0), "RIGHT"),
+    ]
+    if FONT_PATH_IN_USE:
+        nt_style.append(("FONTNAME", (0, 0), (-1, -1), "JP"))
+    next_table.setStyle(TableStyle(nt_style))
+    elems.append(next_table)
+
+    doc.build(elems)
+    buf.seek(0)
+    return buf.read()
+
 # ========= 計算＆セッション保存 =========
 if submitted:
     inv_scores    = [to_score_yn3(q1), to_score_yn3(q2)]
@@ -443,14 +441,13 @@ if submitted:
             "DX・情報共有": "データ断絶型"
         }[cat]
 
-    # セッションへ保存
     st.session_state.update({
         "df": df, "overall_avg": overall_avg, "signal": signal,
         "main_type": main_type, "company": company, "email": email,
-        "result_ready": True
+        "result_ready": True, "ai_comment": None, "ai_tried": False
     })
 
-# ========= 結果画面（セッションから表示） =========
+# ========= 結果画面 =========
 if st.session_state.get("result_ready"):
     df = st.session_state["df"]
     overall_avg = st.session_state["overall_avg"]
@@ -458,8 +455,18 @@ if st.session_state.get("result_ready"):
     main_type = st.session_state["main_type"]
     company = st.session_state["company"]
     email = st.session_state["email"]
-
     current_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
+
+    # --- AIコメントを自動生成（初回のみ） ---
+    if not st.session_state["ai_tried"]:
+        st.session_state["ai_tried"] = True
+        text, err = generate_ai_comment(company, main_type, df, overall_avg)
+        if text:
+            st.session_state["ai_comment"] = text
+        elif err:
+            # API未設定などは静的にフォールバック
+            st.session_state["ai_comment"] = None  # Noneのまま→静的文言を表示
+            st.toast("AIコメントは未設定のため、静的コメントを表示します。", icon="ℹ️")
 
     st.markdown("### 診断結果")
     st.markdown(
@@ -485,33 +492,19 @@ if st.session_state.get("result_ready"):
             x=alt.X("平均スコア:Q", scale=alt.Scale(domain=[0, 5])),
             y=alt.Y("カテゴリ:N", sort="-x"),
             tooltip=["カテゴリ", "平均スコア"]
-        ).properties(height=220)
+        ).properties(height=210)
     )
     st.altair_chart(chart, use_container_width=True)
     st.dataframe(df.style.format({"平均スコア": "{:.2f}"}), use_container_width=True)
 
-    # ===== AIコメント生成 =====
-    with st.expander("AIコメント（約300字）を自動生成する", expanded=False):
-        colA, colB = st.columns([1,1])
-        if colA.button("AIコメントを生成", use_container_width=True):
-            text, err = generate_ai_comment(company, main_type, df, overall_avg)
-            if err:
-                st.error(err)
-            else:
-                st.session_state["ai_comment"] = text
-                st.success("AIコメントを生成しました。下に表示しています。")
+    # --- 画面にもAIコメントを自動表示 ---
+    st.subheader("AIコメント（自動生成）")
+    if st.session_state["ai_comment"]:
+        st.write(st.session_state["ai_comment"])
+    else:
+        st.caption("（OpenAI APIキー未設定等のため、PDFには静的コメントを挿入します）")
 
-        if colB.button("AIコメントをクリア", use_container_width=True):
-            st.session_state["ai_comment"] = None
-
-        if st.session_state["ai_comment"]:
-            st.write(st.session_state["ai_comment"])
-        else:
-            st.caption("（未生成）ボタンを押すと、診断内容に沿った約300字のコメントを生成します。")
-
-    st.success("PDF出力・ログ保存が使えます（下のボタン群）。")
-
-    # PDF: AIコメントがあれば優先して使う
+    # PDF: AIコメントがあれば優先、なければ静的文言
     comment_for_pdf = st.session_state["ai_comment"] or TYPE_TEXT[main_type]
     result_payload = {
         "company": company,
@@ -567,6 +560,7 @@ if st.session_state.get("result_ready"):
 
 else:
     st.caption("フォームに回答し、「診断する」を押してください。")
+
 
 
 
