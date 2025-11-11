@@ -261,7 +261,8 @@ defaults = {
     "result_ready": False, "df": None, "overall_avg": None, "signal": None,
     "main_type": None, "company": "", "email": "",
     "ai_comment": None, "ai_tried": False,
-    "utm_source": "", "utm_medium": "", "utm_campaign": ""
+    "utm_source": "", "utm_medium": "", "utm_campaign": "",
+     "saved_once": False          # ←← これを追加
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -579,7 +580,8 @@ if submitted:
     st.session_state.update({
         "df": df, "overall_avg": overall_avg, "signal": signal,
         "main_type": main_type, "company": company, "email": email,
-        "result_ready": True, "ai_comment": None, "ai_tried": False
+        "result_ready": True, "ai_comment": None, "ai_tried": False,
+        "saved_once": False                 # ←← ここで必ずリセット
     })
 
 # 結果画面
@@ -694,7 +696,14 @@ if st.session_state.get("result_ready"):
         "entry_check": entry_check,
         "report_date": report_date,
     }
+    # ここまでは既存（row を作るところまで）
+
+# ▼▼ 追加：AIコメント生成の試行が終わっていて、まだ保存していない時だけ保存 ▼▼
+if st.session_state.get("ai_tried") and not st.session_state.get("saved_once"):
     auto_save_row(row)
+    st.session_state["saved_once"] = True
+# ▲▲ ここまで ▲▲
+
 
 else:
     st.caption("フォームに回答し、「診断する」を押してください。")
