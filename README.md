@@ -1,1 +1,1 @@
-# victorconsulting-3min-diagnosis
+# victorconsulting-cashflow-diagnosis
